@@ -31,9 +31,9 @@ func reuseFix(
 	primitive identName,
 	args []ast.Expr,
 ) ([]analysis.SuggestedFix, bool) {
-	prim := pass.TypesInfo.ObjectOf(field.Type.(*ast.Ident)).Type()
+	prim := pass.TypesInfo.ObjectOf(ast.Unparen(field.Type).(*ast.Ident)).Type()
 	convs, consts, named, ok := classifyArguments(pass.TypesInfo, pass.Pkg, prim, args)
-	if !ok || !visibleAtAll(pass.Pkg, named, reusePositions(field, consts)) {
+	if !ok || !visibleAtAll(pass.Pkg, named.Obj(), reusePositions(field, consts)) {
 		return nil, false
 	}
 	return []analysis.SuggestedFix{{
@@ -113,26 +113,27 @@ func reusePositions(field *ast.Field, consts []ast.Expr) []token.Pos {
 	return positions
 }
 
-// visibleAtAll reports whether named resolves unshadowed at every position.
-func visibleAtAll(pkg *types.Package, named *types.Named, positions []token.Pos) bool {
+// visibleAtAll reports whether obj resolves unshadowed at every position.
+func visibleAtAll(pkg *types.Package, obj types.Object, positions []token.Pos) bool {
 	for _, pos := range positions {
-		if !visibleAt(pkg, named, pos) {
+		if !visibleAt(pkg, obj, pos) {
 			return false
 		}
 	}
 	return true
 }
 
-// visibleAt reports whether the name of named, written at pos, resolves to
-// named's declaration — package-level and same-package, so it is visible
-// unless a file import or an intervening local declaration shadows it.
-func visibleAt(pkg *types.Package, named *types.Named, pos token.Pos) bool {
+// visibleAt reports whether the name of obj, written at pos, resolves to obj's
+// declaration — a same-package package-level type or a predeclared universe
+// object, so it is visible unless a file import or an intervening declaration
+// (a local one, or a parameter named after a predeclared type) shadows it.
+func visibleAt(pkg *types.Package, obj types.Object, pos token.Pos) bool {
 	scope := pkg.Scope().Innermost(pos)
 	if scope == nil {
 		return false
 	}
-	_, obj := scope.LookupParent(named.Obj().Name(), pos)
-	return obj == named.Obj()
+	_, found := scope.LookupParent(obj.Name(), pos)
+	return found == obj
 }
 
 // reuseEdits assembles the reuse fix: the parameter retype to N, a conversion

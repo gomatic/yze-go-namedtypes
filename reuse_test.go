@@ -18,5 +18,5 @@ import (
 func TestVisibleAtOutsideAnyFileScope(t *testing.T) {
 	pkg := types.NewPackage("example.test/p", "p")
 	named := types.NewNamed(types.NewTypeName(token.NoPos, pkg, "N", nil), types.Typ[types.String], nil)
-	assert.False(t, visibleAt(pkg, named, token.Pos(42)))
+	assert.False(t, visibleAt(pkg, named.Obj(), token.Pos(42)))
 }

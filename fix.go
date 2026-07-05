@@ -41,11 +41,12 @@ const typeNameSuffix identName = "Param"
 // suggestedFixes yields the single naming-oracle fix for the flagged parameter
 // field of fn, or nil when no fix can be guaranteed to compile within the
 // pass: the function or parameter shape is ineligible, the parameter is
-// mutated or addressed, or a call site cannot be safely rewritten. When every
-// call site already converts from one existing same-package named type, the
-// fix reuses that type (see reuse.go); otherwise it mints a skeleton type,
-// skipped when the proposed name is taken (or already minted by an earlier
-// diagnostic in this pass — `--fix` users iterate to fixpoint).
+// mutated or addressed, the primitive's name is shadowed at a body use the fix
+// would wrap, or a call site cannot be safely rewritten. When every call site
+// already converts from one existing same-package named type, the fix reuses
+// that type (see reuse.go); otherwise it mints a skeleton type, skipped when
+// the proposed name is taken (or already minted by an earlier diagnostic in
+// this pass — `--fix` users iterate to fixpoint).
 func suggestedFixes(
 	pass *analysis.Pass,
 	fn *ast.FuncDecl,
@@ -54,7 +55,8 @@ func suggestedFixes(
 	fixed map[identName]bool,
 ) []analysis.SuggestedFix {
 	if !fixEligible(sourcePath(pass.Fset.Position(fn.Pos()).Filename), fn, field) ||
-		unsafeUse(pass.TypesInfo, fn.Body, pass.TypesInfo.Defs[field.Names[0]]) {
+		unsafeUse(pass.TypesInfo, fn.Body, pass.TypesInfo.Defs[field.Names[0]]) ||
+		!primitiveVisible(pass, fn, field, primitive) {
 		return nil
 	}
 	args, ok := wrappableArguments(pass, fn, paramIndex(fn.Type.Params, field), paramCount(fn.Type.Params))
@@ -82,7 +84,7 @@ func skeletonFix(
 	if fixed[name] {
 		return nil
 	}
-	prim := pass.TypesInfo.ObjectOf(field.Type.(*ast.Ident)).Type()
+	prim := pass.TypesInfo.ObjectOf(ast.Unparen(field.Type).(*ast.Ident)).Type()
 	if named, ok := mintedType(pass.Pkg, name, prim); ok {
 		return mintedReuseFix(pass.Pkg, pass.TypesInfo, fn, field, primitive, named, args)
 	}
@@ -127,7 +129,7 @@ func mintedReuseFix(
 	named *types.Named,
 	args []ast.Expr,
 ) []analysis.SuggestedFix {
-	if !visibleAtAll(pkg, named, reusePositions(field, args)) {
+	if !visibleAtAll(pkg, named.Obj(), reusePositions(field, args)) {
 		return nil
 	}
 	name := identName(named.Obj().Name())
@@ -331,6 +333,21 @@ func paramUses(info *types.Info, body *ast.BlockStmt, obj types.Object) []*ast.I
 		return true
 	})
 	return uses
+}
+
+// primitiveVisible reports whether the primitive's name resolves to its
+// predeclared universe object at every body use of the parameter — every
+// position the fix wraps in a conversion back to the primitive. A parameter
+// named after the primitive, or a local declaration reusing its name, shadows
+// it there; the wrap would not resolve to the predeclared type (so it would
+// not compile), and the fix is suppressed entirely.
+func primitiveVisible(pass *analysis.Pass, fn *ast.FuncDecl, field *ast.Field, primitive identName) bool {
+	uses := paramUses(pass.TypesInfo, fn.Body, pass.TypesInfo.Defs[field.Names[0]])
+	positions := make([]token.Pos, 0, len(uses))
+	for _, use := range uses {
+		positions = append(positions, use.Pos())
+	}
+	return visibleAtAll(pass.Pkg, types.Universe.Lookup(string(primitive)), positions)
 }
 
 // fixEdits assembles the fix: the skeleton type declaration above fn, the

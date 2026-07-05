@@ -114,3 +114,18 @@ func recursive(depth int) int { // want `parameter type int is a bare primitive;
 	}
 	return recursive(depth - 1)
 }
+
+// selfNamed names its parameter after the primitive itself, so the conversion
+// the fix would write around the body use — int(int) — would resolve to the
+// parameter, not the predeclared type; the diagnostic stands without a fix.
+func selfNamed(int int) int { // want `parameter type int is a bare primitive; define a named domain type`
+	return int
+}
+
+// shadowedUse declares a local type over the primitive's name before the
+// parameter's only use, so the conversion the fix would write — int(count) —
+// would resolve to the local type; the diagnostic stands without a fix.
+func shadowedUse(count int) any { // want `parameter type int is a bare primitive; define a named domain type`
+	type int = bool
+	return count
+}

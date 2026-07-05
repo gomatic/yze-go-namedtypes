@@ -89,16 +89,18 @@ func allBlank(names []*ast.Ident) bool {
 // paramType yields the element type of a variadic parameter (the type after the
 // `...`), or the field's type unchanged otherwise, so a variadic bare primitive
 // (func f(nums ...int)) is checked and reported at its element type rather than
-// being skipped because its field type is an *ast.Ellipsis.
+// being skipped because its field type is an *ast.Ellipsis. Parentheses are
+// seen through, so func f(nums ...(int)) is checked at its element type too.
 func paramType(expr ast.Expr) ast.Expr {
-	if ellipsis, ok := expr.(*ast.Ellipsis); ok {
+	if ellipsis, ok := ast.Unparen(expr).(*ast.Ellipsis); ok {
 		return ellipsis.Elt
 	}
 	return expr
 }
 
 // barePrimitiveName returns the identifier name when expr names a predeclared
-// primitive type by its predeclared name, and false otherwise. The exemption is
+// primitive type by its predeclared name, and false otherwise. Parentheses are
+// seen through, so func f(a (int)) does not escape the check. The exemption is
 // resolved through the identifier's declaring object rather than the type it
 // presents, so it holds regardless of the gotypesalias GODEBUG setting (under
 // which an alias to a primitive may otherwise surface as a bare *types.Basic):
@@ -108,7 +110,7 @@ func paramType(expr ast.Expr) ast.Expr {
 //     whose underlying type is a primitive (excludes the predeclared error/any
 //     interfaces, while still catching the byte/rune primitive aliases) is flagged.
 func barePrimitiveName(pass *analysis.Pass, expr ast.Expr) (identName, bool) {
-	ident, ok := expr.(*ast.Ident)
+	ident, ok := ast.Unparen(expr).(*ast.Ident)
 	if !ok {
 		return "", false
 	}
