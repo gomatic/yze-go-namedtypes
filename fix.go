@@ -109,7 +109,7 @@ func mintedType(pkg *types.Package, name identName, prim types.Type) (*types.Nam
 		return nil, false
 	}
 	named, ok := obj.Type().(*types.Named)
-	if !ok || named.TypeArgs().Len() != 0 || !types.Identical(named.Underlying(), prim) {
+	if !ok || isGeneric(named) || !types.Identical(named.Underlying(), prim) {
 		return nil, false
 	}
 	return named, true
@@ -157,6 +157,21 @@ func fixEligible(path sourcePath, fn *ast.FuncDecl, field *ast.Field) bool {
 func isVariadic(field *ast.Field) bool {
 	_, ok := field.Type.(*ast.Ellipsis)
 	return ok
+}
+
+// isGeneric reports whether named is a parameterised type. `type N[T any] string`
+// cannot be named bare in a parameter's type, so reusing it would retype the
+// parameter to source that does not compile.
+//
+// The test is on type PARAMETERS, not type arguments. A package-scope lookup
+// yields either a generic origin (parameters, no arguments) or an ordinary
+// defined type; an instantiation reaches package scope only through an alias,
+// which is rejected before this point, and `type M N[int]` is a fresh defined
+// type with neither — legitimately reusable. Checking TypeArgs is therefore
+// both insufficient (it passes the origin, which is the case that occurs) and
+// unreachable.
+func isGeneric(named *types.Named) bool {
+	return named.TypeParams().Len() != 0
 }
 
 // unsafeUse reports whether obj is used inside body in a way that retyping the
@@ -240,86 +255,6 @@ func paramCount(params *ast.FieldList) flatLen {
 	return count
 }
 
-// wrappableArguments yields the argument expression at index of every call to
-// fn within the pass, or false when a rewrite cannot be guaranteed to compile:
-// fn is referenced as a value somewhere (its signature change would propagate
-// beyond the calls the fix rewrites), a call does not pass exactly count
-// single-valued arguments (a spread `f(g())` call cannot be wrapped), or fn
-// calls itself (the argument wrap would collide with the same fix's body-use
-// conversions).
-func wrappableArguments(
-	pass *analysis.Pass,
-	fn *ast.FuncDecl,
-	index flatIndex,
-	count flatLen,
-) ([]ast.Expr, bool) {
-	obj := pass.TypesInfo.Defs[fn.Name]
-	calls := functionCalls(pass.TypesInfo, pass.Files, obj)
-	if countUses(pass.TypesInfo, pass.Files, obj) != len(calls) {
-		return nil, false
-	}
-	args, ok := callArguments(calls, index, count)
-	if !ok || selfCall(fn, args) {
-		return nil, false
-	}
-	return args, true
-}
-
-// functionCalls collects every call expression in files whose callee is obj.
-func functionCalls(info *types.Info, files []*ast.File, obj types.Object) []*ast.CallExpr {
-	var calls []*ast.CallExpr
-	for _, file := range files {
-		ast.Inspect(file, func(n ast.Node) bool {
-			if call, ok := n.(*ast.CallExpr); ok && identIs(info, ast.Unparen(call.Fun), obj) {
-				calls = append(calls, call)
-			}
-			return true
-		})
-	}
-	return calls
-}
-
-// countUses counts every identifier in files that uses obj, so a caller can
-// detect uses that are not direct calls.
-func countUses(info *types.Info, files []*ast.File, obj types.Object) int {
-	count := 0
-	for _, file := range files {
-		ast.Inspect(file, func(n ast.Node) bool {
-			if ident, ok := n.(*ast.Ident); ok && info.Uses[ident] == obj {
-				count++
-			}
-			return true
-		})
-	}
-	return count
-}
-
-// callArguments yields the argument at index from each call, or false when a
-// call does not pass exactly count arguments (a spread multi-value call, or a
-// variadic call with a different argument count).
-func callArguments(calls []*ast.CallExpr, index flatIndex, count flatLen) ([]ast.Expr, bool) {
-	args := make([]ast.Expr, 0, len(calls))
-	for _, call := range calls {
-		if flatLen(len(call.Args)) != count {
-			return nil, false
-		}
-		args = append(args, call.Args[int(index)])
-	}
-	return args, true
-}
-
-// selfCall reports whether any collected argument lies inside fn's own body —
-// a recursive call, whose argument wrap would occupy the same positions as the
-// body-use conversions of the same fix.
-func selfCall(fn *ast.FuncDecl, args []ast.Expr) bool {
-	for _, arg := range args {
-		if fn.Body.Pos() <= arg.Pos() && arg.Pos() < fn.Body.End() {
-			return true
-		}
-	}
-	return false
-}
-
 // paramUses collects every identifier in body that uses obj. The fix wraps
 // each in a conversion back to the primitive; assignment targets never appear
 // here because a mutated parameter is rejected by unsafeUse, and the declaring
@@ -348,69 +283,4 @@ func primitiveVisible(pass *analysis.Pass, fn *ast.FuncDecl, field *ast.Field, p
 		positions = append(positions, use.Pos())
 	}
 	return visibleAtAll(pass.Pkg, types.Universe.Lookup(string(primitive)), positions)
-}
-
-// fixEdits assembles the fix: the skeleton type declaration above fn, the
-// parameter retype, a conversion back to the primitive around every body use
-// (conservative — it over-converts, but always compiles), and a wrap of every
-// call-site argument in the new type.
-func fixEdits(
-	info *types.Info,
-	fn *ast.FuncDecl,
-	field *ast.Field,
-	name identName,
-	primitive identName,
-	args []ast.Expr,
-) []analysis.TextEdit {
-	decl := declEdit(fn, identName(field.Names[0].Name), name, primitive)
-	return append([]analysis.TextEdit{decl}, retypeEdits(info, fn, field, name, primitive, args)...)
-}
-
-// retypeEdits are the declaration-free edits shared by the minting and the
-// minted-reuse fixes: retype the parameter, convert every body use back to
-// the primitive, and wrap every in-package call-site argument in the type.
-func retypeEdits(
-	info *types.Info,
-	fn *ast.FuncDecl,
-	field *ast.Field,
-	name identName,
-	primitive identName,
-	args []ast.Expr,
-) []analysis.TextEdit {
-	uses := paramUses(info, fn.Body, info.Defs[field.Names[0]])
-	edits := make([]analysis.TextEdit, 0, 1+2*len(uses)+2*len(args))
-	edits = append(edits,
-		analysis.TextEdit{Pos: field.Type.Pos(), End: field.Type.End(), NewText: []byte(name)},
-	)
-	for _, use := range uses {
-		edits = append(edits, wrapEdits(use, primitive)...)
-	}
-	for _, arg := range args {
-		edits = append(edits, wrapEdits(arg, name)...)
-	}
-	return edits
-}
-
-// declEdit inserts the skeleton type declaration immediately above fn — before
-// its doc comment when it has one — with a comment telling the developer to
-// rename the type to the real domain concept.
-func declEdit(fn *ast.FuncDecl, param, name, primitive identName) analysis.TextEdit {
-	pos := fn.Pos()
-	if fn.Doc != nil {
-		pos = fn.Doc.Pos()
-	}
-	text := fmt.Sprintf(
-		"// %s names the %s parameter of %s; rename it to the real domain concept.\ntype %s %s\n\n",
-		name, param, fn.Name.Name, name, primitive,
-	)
-	return analysis.TextEdit{Pos: pos, End: pos, NewText: []byte(text)}
-}
-
-// wrapEdits wraps expr in a conversion to the named type or primitive `with`
-// using two insertions, so the fix never needs the source text of expr.
-func wrapEdits(expr ast.Expr, with identName) []analysis.TextEdit {
-	return []analysis.TextEdit{
-		{Pos: expr.Pos(), End: expr.Pos(), NewText: []byte(string(with) + "(")},
-		{Pos: expr.End(), End: expr.End(), NewText: []byte(")")},
-	}
 }
