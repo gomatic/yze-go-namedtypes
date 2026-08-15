@@ -46,6 +46,47 @@ func diagnosticsIn(t *testing.T, pkg string) map[string][]analysis.Diagnostic {
 	return byFunc
 }
 
+// diagnosticsAcross is diagnosticsIn for a corpus package that carries test
+// files. go/analysis presents such a package as several variants — the
+// production one and the test binary's — so the single-result requirement
+// diagnosticsIn asserts does not hold, and the diagnostics of interest live in
+// the variant diagnosticsIn would have rejected the run for having.
+func diagnosticsAcross(t *testing.T, pkg string) map[string][]analysis.Diagnostic {
+	t.Helper()
+	byFunc := map[string][]analysis.Diagnostic{}
+	for _, result := range analysistest.Run(t, analysistest.TestData(), namedtypes.Analyzer, pkg) {
+		for _, diag := range result.Diagnostics {
+			name := enclosingFunc(result.Pass, diag)
+			byFunc[name] = append(byFunc[name], diag)
+		}
+	}
+	return byFunc
+}
+
+// TestLineDirectiveDoesNotMoveTheFile pins that fix eligibility is decided by
+// the name the go tool opened the file at, never by the name the file gives
+// itself.
+//
+// A `//line` directive is ordinary compiled source that rewrites what
+// fset.Position reports. Reading the adjusted path put the judged file in
+// charge of its own identity in both directions: production source claiming
+// `//line zz_test.go:1` lost its fix, and a real test file claiming
+// `//line prod.go:1` collected one — a fix whose entire promise is that it
+// compiles, offered for a file whose call sites the production driver never
+// loads. Neither corpus package differs from a fix-eligible one in anything but
+// that comment line.
+func TestLineDirectiveDoesNotMoveTheFile(t *testing.T) {
+	source := diagnosticsAcross(t, "linesrc")["greet"]
+	require.Len(t, source, 1, "production source is reported whatever it calls itself")
+	assert.NotEmpty(t, source[0].SuggestedFixes,
+		"a source file claiming to be a test is still a source file, and its fix is still provable")
+
+	test := diagnosticsAcross(t, "linetest")["helper"]
+	require.Len(t, test, 1, "a test file's bare primitive is still reported")
+	assert.Empty(t, test[0].SuggestedFixes,
+		"a test file claiming to be source is still a test file, and its fix is still unprovable")
+}
+
 // enclosingFunc names the function a diagnostic was reported inside.
 func enclosingFunc(pass *analysis.Pass, diag analysis.Diagnostic) string {
 	for _, file := range pass.Files {

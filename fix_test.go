@@ -8,12 +8,14 @@ package namedtypes
 
 import (
 	"go/ast"
+	"go/parser"
 	"go/token"
 	"go/types"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/tools/go/analysis"
 )
 
 // eligibleFixture yields a minimal unexported single-string-parameter function
@@ -92,6 +94,28 @@ func TestFixEligible(t *testing.T) {
 			assert.Equal(t, tt.eligible, fixEligible(tt.path, fn, field))
 		})
 	}
+}
+
+// TestDeclaringFileNeverReadsTheAdjustedPath names declaringFile's claim: it
+// yields the path the go tool OPENED the file at, never the path a `//line`
+// directive in the file rewrites positions to. The second assertion is what
+// makes the first mean anything — it proves the directive really was in force,
+// so a declaringFile that had read fset.Position would have returned zz_test.go
+// and withheld the fix from ordinary production source.
+func TestDeclaringFileNeverReadsTheAdjustedPath(t *testing.T) {
+	t.Parallel()
+
+	const src = "//line zz_test.go:1\npackage p\n\nfunc lower(s string) {}\n"
+
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "real.go", src, parser.ParseComments)
+	require.NoError(t, err)
+	fn, ok := file.Decls[0].(*ast.FuncDecl)
+	require.True(t, ok)
+
+	assert.Equal(t, sourcePath("real.go"), declaringFile(&analysis.Pass{Fset: fset}, fn))
+	assert.Equal(t, "zz_test.go", fset.Position(fn.Pos()).Filename,
+		"the directive is in force, so reading the adjusted path would answer differently")
 }
 
 // TestMintedTypeRequiresAnExactlyMatchingUnderlying names mintedType's claim:

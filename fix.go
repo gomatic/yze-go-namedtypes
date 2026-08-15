@@ -54,7 +54,7 @@ func suggestedFixes(
 	primitive identName,
 	fixed map[identName]bool,
 ) []analysis.SuggestedFix {
-	if !fixEligible(sourcePath(pass.Fset.Position(fn.Pos()).Filename), fn, field) ||
+	if !fixEligible(declaringFile(pass, fn), fn, field) ||
 		unsafeUse(pass.TypesInfo, fn.Body, pass.TypesInfo.Defs[field.Names[0]]) ||
 		!primitiveVisible(pass, fn, field, primitive) {
 		return nil
@@ -137,6 +137,16 @@ func mintedReuseFix(
 		Message:   fmt.Sprintf("reuse the existing named type %s for this parameter", name),
 		TextEdits: retypeEdits(info, fn, field, name, primitive, args),
 	}}
+}
+
+// declaringFile is the path fn's file was OPENED at, which is token.File.Name
+// and never fset.Position — Position applies `//line` directives, ordinary
+// compiled source that let the judged file decide its own identity in both
+// directions: source carrying `//line zz_test.go:1` lost a fix it had earned,
+// and a test file carrying `//line prod.go:1` collected one whose only promise
+// is that it compiles against call sites this pass never loads.
+func declaringFile(pass *analysis.Pass, fn *ast.FuncDecl) sourcePath {
+	return sourcePath(pass.Fset.File(fn.Pos()).Name())
 }
 
 // fixEligible reports whether the flagged parameter may be retyped at all: the
